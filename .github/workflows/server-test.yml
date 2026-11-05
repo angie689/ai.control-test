@@ -1,0 +1,31 @@
+name: Test Ollama server (no IPA build)
+on:
+  push:
+    branches: [ollama-server]
+    paths:
+      - 'server.py'
+      - 'app.py'
+      - 'test_server.py'
+      - 'Dockerfile'
+      - 'deploy/**'
+      - '.github/workflows/server-test.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test Python inference gateway
+        run: python -m unittest discover -v
+      - name: Confirm hosted server is not using OpenRouter
+        run: |
+          if grep -q OPENROUTER server.py; then
+            echo "OpenRouter must not be used in this deployment" >&2
+            exit 1
+          fi
