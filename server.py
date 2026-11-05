@@ -1,7 +1,7 @@
 """Stateless SLM inference gateway. The restricted sandbox lives in the iPhone IPA.
 
 Host behind HTTPS. This server has no agent state and cannot run AI tool calls.
-OpenRouter mode needs OPENROUTER_API_KEY (no Ollama required).
+Connects to Groq's hosted model. No Ollama or OpenRouter is required.
 """
 import hmac
 import json
@@ -86,51 +86,49 @@ def validate_messages(messages):
 class InferenceEngine:
     @property
     def model(self):
-        if os.getenv("OPENROUTER_API_KEY"):
-            return os.getenv("OPENROUTER_MODEL", "qwen/qwen3-1.7b:free")
-        return os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
+        return os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
     def complete(self, messages):
-        hosted = bool(os.getenv("OPENROUTER_API_KEY"))
-        if hosted:
-            endpoint = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
-                "Content-Type": "application/json",
-                "X-Title": "AI Controller Thing"
-            }
-        else:
-            if os.getenv("RENDER"):
-                raise ValueError("Configure OPENROUTER_API_KEY on the hosted inference gateway.")
-            endpoint = "http://127.0.0.1:11434/v1/chat/completions"
-            headers = {"Content-Type": "application/json"}
-        payload = json.dumps({
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            raise ValueError("Groq isn't configured yet. Set GROQ_API_KEY on the server.")
+        body = json.dumps({
             "model": self.model,
             "messages": messages,
             "tools": TOOLS,
-            "max_tokens": 800,
+            "tool_choice": "auto",
+            "max_completion_tokens": 1024,
             "stream": False
         }).encode("utf-8")
-        request = Request(endpoint, data=payload, headers=headers, method="POST")
+        request = Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=body,
+            headers={"Authorization": "Bearer " + api_key,
+                     "Content-Type": "application/json"},
+            method="POST"
+        )
         try:
+            # No proxy, redirects or alternative hosts for the model request.
             opener = build_opener(ProxyHandler({}), NoRedirect())
-            with opener.open(request, timeout=150) as reply:
-                response = json.load(reply)
-            result = response.get("choices", [{}])[0].get("message", {})
-            if not isinstance(result, dict) or result.get("role") != "assistant":
-                raise ValueError("Invalid model response.")
-            allowed = {"role", "content", "tool_calls"}
-            return {name: value for name, value in result.items() if name in allowed}
-        except HTTPError as error:
-            if error.code == 429:
-                raise ValueError("Hosted model rate limit reached.") from None
-            if error.code == 401:
-                raise ValueError("SLM provider API key is invalid.") from None
-            if error.code == 404:
-                raise ValueError("Selected model is unavailable.") from None
-            raise ValueError("Model provider returned HTTP " + str(error.code)) from None
+            with opener.open(request, timeout=150) as response:
+                payload = json.load(response)
+            message = payload.get("choices", [{}])[0].get("message", {})
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                raise ValueError("Groq returned an invalid assistant response.")
+            return {key: value for key, value in message.items()
+                    if key in ("role", "content", "tool_calls")}
+        except HTTPError as exc:
+            explanation = {
+                400: "Groq rejected the request or tool arguments.",
+                401: "Groq API key is invalid.",
+                403: "Groq API key cannot access this model.",
+                404: "Requested model is unavailable at Groq.",
+                413: "Message history is too long for Groq.",
+                429: "Groq free-tier rate limit reached."
+            }.get(exc.code, "Groq error HTTP " + str(exc.code))
+            raise ValueError(explanation) from None
         except (URLError, TimeoutError):
-            raise ValueError("SLM host is offline or did not respond.") from None
+            raise ValueError("Could not reach Groq. Check the inference connection.") from None
 
 
 class InferenceHandler(BaseHTTPRequestHandler):
