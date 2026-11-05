@@ -1,7 +1,7 @@
 """Stateless SLM inference gateway. The restricted sandbox lives in the iPhone IPA.
 
 Host behind HTTPS. This server has no agent state and cannot run AI tool calls.
-OpenRouter mode needs OPENROUTER_API_KEY (no Ollama required).
+Run Ollama with qwen3:1.7b on the remote host. No third-party inference API required.
 """
 import hmac
 import json
@@ -86,51 +86,31 @@ def validate_messages(messages):
 class InferenceEngine:
     @property
     def model(self):
-        if os.getenv("OPENROUTER_API_KEY"):
-            return os.getenv("OPENROUTER_MODEL", "qwen/qwen3-1.7b:free")
         return os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
 
     def complete(self, messages):
-        hosted = bool(os.getenv("OPENROUTER_API_KEY"))
-        if hosted:
-            endpoint = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
-                "Content-Type": "application/json",
-                "X-Title": "AI Controller Thing"
-            }
-        else:
-            if os.getenv("RENDER"):
-                raise ValueError("Configure OPENROUTER_API_KEY on the hosted inference gateway.")
-            endpoint = "http://127.0.0.1:11434/v1/chat/completions"
-            headers = {"Content-Type": "application/json"}
-        payload = json.dumps({
-            "model": self.model,
-            "messages": messages,
-            "tools": TOOLS,
-            "max_tokens": 800,
-            "stream": False
-        }).encode("utf-8")
-        request = Request(endpoint, data=payload, headers=headers, method="POST")
+        # The model is hosted on this machine, listening on loopback only.
+        body = json.dumps({"model": self.model, "messages": messages,
+                           "tools": TOOLS, "max_tokens": 800,
+                           "stream": False}).encode("utf-8")
+        request = Request("http://127.0.0.1:11434/v1/chat/completions",
+                          data=body, headers={"Content-Type": "application/json"},
+                          method="POST")
         try:
             opener = build_opener(ProxyHandler({}), NoRedirect())
-            with opener.open(request, timeout=150) as reply:
-                response = json.load(reply)
-            result = response.get("choices", [{}])[0].get("message", {})
+            with opener.open(request, timeout=150) as response:
+                output = json.load(response)
+            result = output.get("choices", [{}])[0].get("message", {})
             if not isinstance(result, dict) or result.get("role") != "assistant":
-                raise ValueError("Invalid model response.")
-            allowed = {"role", "content", "tool_calls"}
-            return {name: value for name, value in result.items() if name in allowed}
+                raise ValueError("Invalid Ollama model response.")
+            return {key: value for key, value in result.items()
+                    if key in ("role", "content", "tool_calls")}
         except HTTPError as error:
-            if error.code == 429:
-                raise ValueError("Hosted model rate limit reached.") from None
-            if error.code == 401:
-                raise ValueError("SLM provider API key is invalid.") from None
             if error.code == 404:
-                raise ValueError("Selected model is unavailable.") from None
-            raise ValueError("Model provider returned HTTP " + str(error.code)) from None
+                raise ValueError("Model not installed on Ollama: " + self.model) from None
+            raise ValueError("Ollama returned HTTP " + str(error.code)) from None
         except (URLError, TimeoutError):
-            raise ValueError("SLM host is offline or did not respond.") from None
+            raise ValueError("Cannot connect to Ollama on the remote server.") from None
 
 
 class InferenceHandler(BaseHTTPRequestHandler):
