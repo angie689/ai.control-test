@@ -1,4 +1,4 @@
-# AI Controller Thing (iPhone IPA)
+# AI Control test
 
 A native **iPhone text-based AI app** that uses a remote small language model (SLM) for generating replies, while keeping its **agents, virtual applications, tools and sandbox on the iPhone**.
 
