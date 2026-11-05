@@ -1,0 +1,65 @@
+name: Build iPhone IPA ZIP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test the sandbox and HTTP server
+        run: python -m unittest discover -v
+
+  ipa:
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+      - name: Build unsigned device app
+        run: |
+          xcodebuild \
+            -project AIController.xcodeproj \
+            -scheme AIController \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/Build" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Package IPA inside SideStore ZIP
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/Build/Build/Products/Release-iphoneos/AIController.app"
+          test -d "$app"
+          mkdir -p "$RUNNER_TEMP/Payload" dist
+          ditto "$app" "$RUNNER_TEMP/Payload/AIController.app"
+          cd "$RUNNER_TEMP"
+          /usr/bin/zip -qr "AIController.ipa" Payload
+          /usr/bin/zip -q -0 "AIController-IPA.zip" "AIController.ipa"
+          unzip -t "AIController-IPA.zip"
+          unzip -t "AIController.ipa"
+          cp "AIController-IPA.zip" "$GITHUB_WORKSPACE/dist/AIController-IPA.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AIController-IPA-ZIP
+          path: dist/AIController-IPA.zip
+          retention-days: 14
+          if-no-files-found: error

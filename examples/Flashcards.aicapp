@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "id": "flashcards",
+  "name": "Flashcards",
+  "description": "An offline flashcard notebook for an AI agent, with its own virtual card collection.",
+  "actions": [
+    {
+      "id": "save_card",
+      "title": "Save Card",
+      "description": "Write a flashcard under a title using key and text.",
+      "operation": "write"
+    },
+    {
+      "id": "list_cards",
+      "title": "List Cards",
+      "description": "List every flashcard title.",
+      "operation": "list"
+    },
+    {
+      "id": "read_card",
+      "title": "Read Card",
+      "description": "Read a named flashcard using key.",
+      "operation": "read"
+    },
+    {
+      "id": "append_card",
+      "title": "Extend Card",
+      "description": "Append an explanation to a card using key and text.",
+      "operation": "append"
+    },
+    {
+      "id": "delete_card",
+      "title": "Delete Card",
+      "description": "Remove a flashcard using key.",
+      "operation": "delete"
+    }
+  ]
+}
