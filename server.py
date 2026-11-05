@@ -1,7 +1,8 @@
 """Stateless SLM inference gateway. The restricted sandbox lives in the iPhone IPA.
 
 Host behind HTTPS. This server has no agent state and cannot run AI tool calls.
-Run Ollama with qwen3:1.7b on the remote host. No third-party inference API required.
+Hosted mode: set GROQ_API_KEY (and optionally GROQ_MODEL, default openai/gpt-oss-20b).
+Also supported: OPENROUTER_API_KEY, or a local Ollama on loopback for self-hosting.
 """
 import hmac
 import json
@@ -84,33 +85,75 @@ def validate_messages(messages):
 
 
 class InferenceEngine:
+    """Provider priority: Groq, then OpenRouter, then local Ollama (never on Render)."""
+
+    @property
+    def provider(self):
+        if os.getenv("GROQ_API_KEY"):
+            return "groq"
+        if os.getenv("OPENROUTER_API_KEY"):
+            return "openrouter"
+        return "ollama"
+
     @property
     def model(self):
+        provider = self.provider
+        if provider == "groq":
+            return os.getenv("GROQ_MODEL") or "openai/gpt-oss-20b"
+        if provider == "openrouter":
+            return os.getenv("OPENROUTER_MODEL", "qwen/qwen3-1.7b:free")
         return os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
 
     def complete(self, messages):
-        # The model is hosted on this machine, listening on loopback only.
+        provider = self.provider
+        if provider == "groq":
+            endpoint = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": "Bearer " + os.environ["GROQ_API_KEY"],
+                "Content-Type": "application/json",
+                # Groq sits behind Cloudflare, which can block urllib's default agent.
+                "User-Agent": "AIControllerGateway/2",
+            }
+        elif provider == "openrouter":
+            endpoint = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
+                "Content-Type": "application/json",
+                "X-Title": "AI Controller Thing",
+            }
+        else:
+            if os.getenv("RENDER"):
+                raise ValueError("Configure GROQ_API_KEY on the hosted inference gateway.")
+            endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+            headers = {"Content-Type": "application/json"}
         body = json.dumps({"model": self.model, "messages": messages,
                            "tools": TOOLS, "max_tokens": 800,
                            "stream": False}).encode("utf-8")
-        request = Request("http://127.0.0.1:11434/v1/chat/completions",
-                          data=body, headers={"Content-Type": "application/json"},
-                          method="POST")
+        request = Request(endpoint, data=body, headers=headers, method="POST")
         try:
             opener = build_opener(ProxyHandler({}), NoRedirect())
-            with opener.open(request, timeout=150) as response:
+            with opener.open(request, timeout=90) as response:
                 output = json.load(response)
             result = output.get("choices", [{}])[0].get("message", {})
             if not isinstance(result, dict) or result.get("role") != "assistant":
-                raise ValueError("Invalid Ollama model response.")
+                raise ValueError("Invalid model response.")
+            # Drops provider extras such as gpt-oss "reasoning"; keeps tool_calls.
             return {key: value for key, value in result.items()
                     if key in ("role", "content", "tool_calls")}
         except HTTPError as error:
+            if error.code == 429:
+                raise ValueError("Hosted model rate limit reached.") from None
+            if error.code in (401, 403):
+                raise ValueError("SLM provider rejected the API key or request.") from None
             if error.code == 404:
-                raise ValueError("Model not installed on Ollama: " + self.model) from None
-            raise ValueError("Ollama returned HTTP " + str(error.code)) from None
+                raise ValueError("Selected model is unavailable: " + self.model) from None
+            if error.code == 400:
+                raise ValueError("Model rejected the request (possibly a malformed tool call).") from None
+            raise ValueError("Model provider returned HTTP " + str(error.code)) from None
         except (URLError, TimeoutError):
-            raise ValueError("Cannot connect to Ollama on the remote server.") from None
+            raise ValueError("SLM host is offline or did not respond.") from None
+        except json.JSONDecodeError:
+            raise ValueError("Model provider returned invalid JSON.") from None
 
 
 class InferenceHandler(BaseHTTPRequestHandler):
